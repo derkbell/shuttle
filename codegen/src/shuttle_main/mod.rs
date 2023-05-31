@@ -1,16 +1,74 @@
+use std::fmt::Error;
+
 use proc_macro::TokenStream;
 use proc_macro_error::emit_error;
 use quote::{quote, ToTokens};
 use syn::{
-    parse::Parse, parse_macro_input, parse_quote, punctuated::Punctuated, spanned::Spanned,
+    parse::{Parse, Parser},
+    parse_macro_input, parse_quote,
+    punctuated::Punctuated,
+    spanned::Spanned,
     Attribute, Expr, ExprLit, FnArg, Ident, ItemFn, Lit, Pat, PatIdent, Path, ReturnType,
     Signature, Stmt, Token, Type, TypePath,
 };
 
-pub(crate) fn r#impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
+type AttributeArgs = syn::punctuated::Punctuated<syn::Meta, syn::Token![,]>;
+
+#[derive(Default, Debug)]
+struct Config {
+    pub log_level: Option<String>,
+}
+
+fn parse_args(args: AttributeArgs) -> Result<Config, syn::Error> {
+    let mut config = Config::default();
+
+    for arg in args {
+        match arg {
+            syn::Meta::NameValue(namevalue) => {
+                let ident = namevalue
+                    .path
+                    .get_ident()
+                    .ok_or_else(|| {
+                        syn::Error::new_spanned(&namevalue, "Must have specified ident")
+                    })?
+                    .to_string()
+                    .to_lowercase();
+                let lit = match &namevalue.value {
+                    syn::Expr::Lit(syn::ExprLit { lit, .. }) => lit,
+                    expr => return Err(syn::Error::new_spanned(expr, "Must be a literal")),
+                };
+                match ident.as_str() {
+                    "log_level" => {
+                        config.log_level = Some(
+                            match lit {
+                                syn::Lit::Str(s) => Ok(s.value()),
+                                syn::Lit::Verbatim(s) => Ok(s.to_string()),
+                                _ => Err(()),
+                            }
+                            .unwrap(),
+                        )
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(config)
+}
+
+pub(crate) fn r#impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut fn_decl = parse_macro_input!(item as ItemFn);
 
-    let loader = Loader::from_item_fn(&mut fn_decl);
+    let config = AttributeArgs::parse_terminated
+        .parse2(attr.into())
+        .and_then(|args| parse_args(args))
+        .unwrap();
+
+    println!("GOT GOT GOT {:?}", config);
+
+    let loader = Loader::from_item_fn(&mut fn_decl, config);
 
     let expanded = quote! {
         #[tokio::main]
@@ -30,6 +88,7 @@ struct Loader {
     fn_ident: Ident,
     fn_inputs: Vec<Input>,
     fn_return: TypePath,
+    config: Config,
 }
 
 #[derive(Debug, PartialEq)]
@@ -84,7 +143,7 @@ impl Parse for BuilderOption {
 }
 
 impl Loader {
-    pub(crate) fn from_item_fn(item_fn: &mut ItemFn) -> Option<Self> {
+    pub(crate) fn from_item_fn(item_fn: &mut ItemFn, config: Config) -> Option<Self> {
         let fn_ident = item_fn.sig.ident.clone();
 
         if fn_ident.to_string().as_str() == "main" {
@@ -125,6 +184,7 @@ impl Loader {
             fn_ident: fn_ident.clone(),
             fn_inputs: inputs,
             fn_return: type_path,
+            config,
         })
     }
 }
@@ -188,6 +248,16 @@ impl ToTokens for Loader {
         let mut fn_inputs_builder_options: Vec<_> = Vec::with_capacity(self.fn_inputs.len());
 
         let mut needs_vars = false;
+
+        let log_level = self.config.log_level.clone().unwrap();
+        let log_level: Ident = match log_level.as_ref() {
+            "off" => parse_quote!(OFF),
+            "error" => parse_quote!(ERROR),
+            "warn" => parse_quote!(WARN),
+            "info" => parse_quote!(INFO),
+            "debug" => parse_quote!(DEBUG),
+            _ => parse_quote!(TRACE),
+        };
 
         for input in self.fn_inputs.iter() {
             fn_inputs.push(&input.ident);
@@ -261,6 +331,7 @@ impl ToTokens for Loader {
 
                 shuttle_runtime::tracing_subscriber::registry()
                     .with(filter_layer)
+                    .with(shuttle_runtime::tracing_subscriber::filter::LevelFilter::#log_level)
                     .with(logger)
                     .init();
 
@@ -294,7 +365,8 @@ mod tests {
             async fn simple() -> ShuttleAxum {}
         );
 
-        let actual = Loader::from_item_fn(&mut input).unwrap();
+        let actual =
+            Loader::from_item_fn(&mut input, crate::shuttle_main::Config::default()).unwrap();
         let expected_ident: Ident = parse_quote!(simple);
 
         assert_eq!(actual.fn_ident, expected_ident);
@@ -307,6 +379,7 @@ mod tests {
             fn_ident: parse_quote!(simple),
             fn_inputs: Vec::new(),
             fn_return: parse_quote!(ShuttleSimple),
+            config: crate::shuttle_main::Config::default(),
         };
 
         let actual = quote!(#input);
@@ -342,7 +415,8 @@ mod tests {
             async fn complex(#[shuttle_shared_db::Postgres] pool: PgPool) -> ShuttleTide {}
         );
 
-        let actual = Loader::from_item_fn(&mut input).unwrap();
+        let actual =
+            Loader::from_item_fn(&mut input, crate::shuttle_main::Config::default()).unwrap();
         let expected_ident: Ident = parse_quote!(complex);
         let expected_inputs: Vec<Input> = vec![Input {
             ident: parse_quote!(pool),
@@ -388,6 +462,7 @@ mod tests {
                 },
             ],
             fn_return: parse_quote!(ShuttleComplex),
+            config: crate::shuttle_main::Config::default(),
         };
 
         let actual = quote!(#input);
@@ -464,7 +539,8 @@ mod tests {
             }
         );
 
-        let actual = Loader::from_item_fn(&mut input).unwrap();
+        let actual =
+            Loader::from_item_fn(&mut input, crate::shuttle_main::Config::default()).unwrap();
         let expected_ident: Ident = parse_quote!(complex);
         let mut expected_inputs: Vec<Input> = vec![Input {
             ident: parse_quote!(pool),
@@ -501,6 +577,7 @@ mod tests {
                 },
             }],
             fn_return: parse_quote!(ShuttleComplex),
+            config: crate::shuttle_main::Config::default(),
         };
 
         input.fn_inputs[0]

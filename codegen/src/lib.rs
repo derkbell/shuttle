@@ -10,7 +10,7 @@ use proc_macro_error::proc_macro_error;
 #[proc_macro_error]
 #[proc_macro_attribute]
 pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
-    shuttle_main::r#impl(attr, item)
+    shuttle_main::r#impl(attr.into(), item.into()).into()
 }
 
 #[cfg(feature = "next")]
