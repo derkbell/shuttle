@@ -66,8 +66,6 @@ pub(crate) fn r#impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         .and_then(|args| parse_args(args))
         .unwrap();
 
-    println!("GOT GOT GOT {:?}", config);
-
     let loader = Loader::from_item_fn(&mut fn_decl, config);
 
     let expanded = quote! {
